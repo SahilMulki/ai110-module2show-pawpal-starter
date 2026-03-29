@@ -1,5 +1,8 @@
+from datetime import date, time
+
 import streamlit as st
-from pawpal_system import Owner, Pet, Scheduler, Task, TaskType, Frequency
+
+from pawpal_system import Frequency, Owner, Pet, Scheduler, Task, TaskType
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
@@ -18,7 +21,7 @@ owner_name = st.text_input("Owner name", value="Jordan")
 if st.button("Create owner"):
     st.session_state.owner = Owner(name=owner_name)
     st.session_state.scheduler = Scheduler(owner=st.session_state.owner)
-    st.success(f"Owner '{owner_name}' created.")
+    st.success(f"Welcome, {owner_name}! Your profile has been created.")
 
 if st.session_state.owner is None:
     st.info("Enter your name above and click 'Create owner' to get started.")
@@ -27,7 +30,7 @@ if st.session_state.owner is None:
 st.divider()
 
 # --- Pet setup ---
-st.subheader("Add a Pet")
+st.subheader("Your Pets")
 pet_name = st.text_input("Pet name", value="Mochi")
 pet_breed = st.text_input("Breed", value="Shiba Inu")
 pet_age = st.number_input("Age", min_value=0, max_value=30, value=2)
@@ -35,11 +38,13 @@ pet_age = st.number_input("Age", min_value=0, max_value=30, value=2)
 if st.button("Add pet"):
     pet = Pet(name=pet_name, breed=pet_breed, age=pet_age)
     st.session_state.owner.add_pet(pet)
-    st.success(f"Added pet '{pet_name}'.")
+    st.success(f"{pet_name} has been added to your care list.")
 
 if st.session_state.owner.pets:
-    st.write("Registered pets:")
-    st.table([{"Name": p.name, "Breed": p.breed, "Age": p.age} for p in st.session_state.owner.pets])
+    st.table([
+        {"Name": p.name, "Breed": p.breed, "Age": p.age}
+        for p in st.session_state.owner.pets
+    ])
 
 st.divider()
 
@@ -61,7 +66,11 @@ with col2:
 with col3:
     priority = st.selectbox("Priority (1=low, 5=high)", [1, 2, 3, 4, 5], index=2)
 
-task_type = st.selectbox("Task type", [t.value for t in TaskType])
+col4, col5 = st.columns(2)
+with col4:
+    task_type = st.selectbox("Task type", [t.value for t in TaskType])
+with col5:
+    preferred_hour = st.number_input("Preferred start time (hour, 0–23)", min_value=0, max_value=23, value=8)
 
 if st.button("Add task"):
     target_pet = next(p for p in st.session_state.owner.pets if p.name == selected_pet_name)
@@ -71,47 +80,74 @@ if st.button("Add task"):
         duration=int(duration),
         priority=priority,
         frequency=Frequency.DAILY,
+        preferred_time=time(int(preferred_hour), 0),
     )
     st.session_state.scheduler.add_task(target_pet, task)
-    st.success(f"Task '{task_title}' added to {selected_pet_name}.")
+    st.success(f"'{task_title}' added to {selected_pet_name}'s schedule.")
 
+# --- Current tasks table (sorted by priority) ---
 all_tasks = st.session_state.owner.get_all_tasks()
 if all_tasks:
-    st.write("All tasks:")
+    st.markdown("**Current tasks (sorted by priority):**")
+    sorted_tasks = sorted(all_tasks, key=lambda t: t.priority, reverse=True)
     st.table([
         {
             "Pet": next(p.name for p in st.session_state.owner.pets if task in p.tasks),
             "Type": task.task_type.value,
             "Description": task.description,
+            "Time": task.preferred_time.strftime("%H:%M") if task.preferred_time else "—",
             "Duration (min)": task.duration,
             "Priority": task.priority,
+            "Done": "Yes" if task.completed else "No",
         }
-        for task in all_tasks
+        for task in sorted_tasks
     ])
+
+# --- Conflict warnings (shown persistently after any task exists) ---
+if all_tasks:
+    conflicts = st.session_state.scheduler.detect_conflicts()
+    if conflicts:
+        st.warning(
+            "**Scheduling conflicts detected.** "
+            "The tasks below overlap in time — consider adjusting their start times or durations:"
+        )
+        for conflict in conflicts:
+            st.error(conflict)
+
+# --- Pending vs completed breakdown ---
+if all_tasks:
+    pending = st.session_state.scheduler.filter_tasks(completed=False)
+    done = st.session_state.scheduler.filter_tasks(completed=True)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.metric("Pending tasks", len(pending))
+    with col_b:
+        st.metric("Completed tasks", len(done))
 
 st.divider()
 
 # --- Generate schedule ---
-st.subheader("Generate Schedule")
+st.subheader("Generate Today's Schedule")
 available_hours = st.number_input("Your available hours today", min_value=1, max_value=24, value=8)
 
 if st.button("Generate schedule"):
-    from datetime import date
     plan = st.session_state.scheduler.generate_plan(
         target_date=date.today(),
         available_hours=int(available_hours),
     )
     st.markdown(f"### Daily Plan for {plan.date}")
     if plan.scheduled_tasks:
+        st.success(f"{len(plan.scheduled_tasks)} task(s) scheduled.")
         st.table([
             {
+                "Priority": t.priority,
                 "Type": t.task_type.value,
                 "Description": t.description,
+                "Time": t.preferred_time.strftime("%H:%M") if t.preferred_time else "—",
                 "Duration (min)": t.duration,
-                "Priority": t.priority,
             }
             for t in plan.scheduled_tasks
         ])
     else:
-        st.warning("No tasks could be scheduled. Add tasks or increase available hours.")
+        st.warning("No tasks could be scheduled. Try adding tasks or increasing your available hours.")
     st.info(plan.reasoning)
