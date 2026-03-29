@@ -1,6 +1,6 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
-from datetime import date, time
+from dataclasses import dataclass, field, replace
+from datetime import date, time, timedelta
 from enum import Enum
 from typing import Optional
 
@@ -43,6 +43,16 @@ class Task:
     preferred_time: Optional[time] = None   # ideal start time (e.g. 08:00 for medicine)
     time_window: Optional[tuple[time, time]] = None  # allowed window (start, end)
     completed: bool = False
+    due_date: Optional[date] = None         # date this occurrence is due
+
+    _RECURRENCE_DELTA: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Set the recurrence delta lookup after dataclass init."""
+        self._RECURRENCE_DELTA = {
+            Frequency.DAILY: timedelta(days=1),
+            Frequency.WEEKLY: timedelta(weeks=1),
+        }
 
     def mark_complete(self) -> None:
         """Mark this task as completed."""
@@ -51,6 +61,12 @@ class Task:
     def mark_incomplete(self) -> None:
         """Reset this task to incomplete (e.g. for a new day)."""
         self.completed = False
+
+    def next_due_date(self) -> Optional[date]:
+        """Return the due date for the next occurrence, or None if not recurring."""
+        base = self.due_date or date.today()
+        delta = self._RECURRENCE_DELTA.get(self.frequency)
+        return base + delta if delta else None
 
 
 @dataclass
@@ -143,11 +159,67 @@ class Scheduler:
         """Add a task directly to a specific pet."""
         pet.add_task(task)
 
+    def complete_task(self, task: Task, pet: Pet) -> Optional[Task]:
+        """Mark a task complete and auto-schedule the next occurrence for recurring tasks."""
+        task.mark_complete()
+        next_date = task.next_due_date()
+        if next_date is None:
+            return None
+        next_task = replace(task, completed=False, due_date=next_date)
+        pet.add_task(next_task)
+        return next_task
+
+    def detect_conflicts(self) -> list[str]:
+        """Return warning strings for any tasks whose time windows overlap."""
+        # Collect only tasks that have a preferred_time set
+        timed: list[tuple[str, Task]] = []
+        for pet in self.owner.pets:
+            for task in pet.tasks:
+                if task.preferred_time is not None:
+                    timed.append((pet.name, task))
+
+        def to_minutes(t: time) -> int:
+            return t.hour * 60 + t.minute
+
+        warnings: list[str] = []
+        for i in range(len(timed)):
+            pet_a, task_a = timed[i]
+            a_start = to_minutes(task_a.preferred_time)
+            a_end = a_start + task_a.duration
+            for j in range(i + 1, len(timed)):
+                pet_b, task_b = timed[j]
+                b_start = to_minutes(task_b.preferred_time)
+                b_end = b_start + task_b.duration
+                if a_start < b_end and b_start < a_end:
+                    warnings.append(
+                        f"CONFLICT: '{task_a.description}' ({pet_a}, "
+                        f"{task_a.preferred_time.strftime('%H:%M')}–{(a_end // 60):02d}:{(a_end % 60):02d}) "
+                        f"overlaps '{task_b.description}' ({pet_b}, "
+                        f"{task_b.preferred_time.strftime('%H:%M')}–{(b_end // 60):02d}:{(b_end % 60):02d})"
+                    )
+        return warnings
+
     def edit_task(self, task: Task, **updates) -> None:
         """Update any Task field by keyword, e.g. edit_task(t, priority=5, duration=20)."""
         for key, value in updates.items():
             if hasattr(task, key):
                 setattr(task, key, value)
+
+    def filter_tasks(
+        self,
+        completed: Optional[bool] = None,
+        pet_name: Optional[str] = None,
+    ) -> list[Task]:
+        """Return tasks optionally filtered by completion status and/or pet name."""
+        results = []
+        for pet in self.owner.pets:
+            if pet_name is not None and pet.name.lower() != pet_name.lower():
+                continue
+            for task in pet.tasks:
+                if completed is not None and task.completed != completed:
+                    continue
+                results.append(task)
+        return results
 
     def add_commitment(self, commitment: Commitment) -> None:
         """Register a time block that reduces the owner's available scheduling time."""
